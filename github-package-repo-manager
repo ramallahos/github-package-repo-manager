@@ -1,0 +1,282 @@
+#!/bin//env bash
+
+config_func() {
+config=$( yad --form --field "Username:CE" "ramallahos" --field "Reponame:CE" "ramallahos-repo" )
+username=$( echo $config | awk -F "|" '{ print $1 }' )
+reponame=$( echo $config | awk -F "|" '{ print $2 }' )
+echo -ne "username='$username'\nreponame='$reponame'\n" | tee $HOME/.config/github-package-repo-manager.conf
+}
+export -f config_func
+
+pre_func() {
+[ -f $HOME/work/github-package-repo-manager/repos.txt ] && rm -f $HOME/work/github-package-repo-manager/repos.txt
+
+if [ ! -f $HOME/.config/github-package-repo-manager.conf ];
+then
+config_func
+else
+source $HOME/.config/github-package-repo-manager.conf
+fi
+}
+export -f pre_func
+
+repo_array() {
+declare -ag repos
+repos=$(curl "https://api.github.com/users/$username/repos?per_page=100" | grep -o 'git@[^"]*' | grep "\/" | gawk -F "/" '{print $NF}' | gawk -F "." '{print $1}' | grep -v "$reponame")
+
+}
+export -f repo_array
+
+list_repos() {
+repo_array
+
+[ -d $HOME/work/github-package-repo-manager ] || mkdir -p $HOME/work/github-package-repo-manager
+
+count=0
+for i in "${repos[@]}" ; do
+    echo -e "$i" | tee -a $HOME/work/github-package-repo-manager/repos.txt
+    count1=$[count1+1]
+done
+
+notify-send -u low "Finished listing repos"
+}
+export -f list_repos
+
+selected_pkgs() {
+list_repos
+
+pkgs=$( sed -e "s/^/FALSE /" $HOME/work/github-package-repo-manager/repos.txt )
+selected_repos_file=$( mktemp --suffix ".slrf" )
+final_selected_repos_file=$( mktemp --suffix ".fslrf" )
+outpak=$( yad --width='400' --height='700' -borders=0 --center \
+              --title='Package Picker' --window-icon=github-desktop \
+              --image=github-desktop --text="Select required packages" \
+              --list --checklist --column "Selected" --column "package" $pkgs)
+
+count1=0
+for i in "${outpak[@]}" ; do
+    echo -e "$i" | tee -a $selected_repos_file
+    count1=$[count1+1]
+done
+
+cat $selected_repos_file | gawk -F "|" '{print $2}' >> $final_selected_repos_file
+declare -ag selected_packages
+selected_packages=(`cat "$final_selected_repos_file"`)
+notify-send -u low "Got Selected Packages repos"
+}
+export -f selected_pkgs
+
+clone_repos() {
+selected_pkgs
+[ -d $HOME/work/github-full-repos ] || mkdir -p $HOME/work/github-full-repos
+
+count2=0
+for i in "${selected_packages[@]}" ; do
+    git clone https://github.com/$username/${i}.git $HOME/work/github-full-repos/$i
+    count2=$[count2+1]
+done
+
+notify-send -u low "Finished cloning selected package repos"
+}
+export -f clone_repos
+
+clone_all_repos() {
+list_repos
+
+declare -ag clone_all_pkgs_array
+clone_all_pkgs_array=(`cat "$HOME/work/github-package-repo-manager/repos.txt"`)
+
+count3=0
+for i in "${clone_all_pkgs_array[@]}" ; do
+    git clone https://github.com/$username/${i}.git $HOME/work/github-full-repos/$i
+    count2=$[count3+1]
+done
+
+notify-send -u low "Finished cloning selected package repos"
+}
+export -f clone_all_repos
+
+clone_pkgbuilds() {
+selected_pkgs
+
+clpkgbld() {
+[ ! -d $HOME/work/github-PKGBUILDS/${1} ] && mkdir -p $HOME/work/github-PKGBUILDS/${1}; curl https://raw.githubusercontent.com/$username/${1}/main/PKGBUILD -o $HOME/work/github-PKGBUILDS/${1}/PKGBUILD
+}
+export -f clpkgbld
+cdpkgbld() {
+cd $HOME/work/github-PKGBUILDS/$1
+}
+bldpkgs() {
+makepkg -cfs
+}
+export -f bldpkgs
+cppkgs() {
+[ -d /home/safwan/work/repo-pkgs/ ] || mkdir -p /home/safwan/work/repo-pkgs/
+cp *.pkg.tar.zst $HOME/work/repo-pkgs/
+}
+export -f cppkgs
+
+
+if [[ $1 == "clone" ]];
+then
+count2=0
+    for i in "${selected_packages[@]}" ; do
+        clpkgbld $i
+        count2=$[count2+1]
+    done
+elif [[ $1 == "build" ]];
+then
+count2=0
+    for i in "${selected_packages[@]}" ; do
+        clpkgbld $i
+        cdpkgbld $i
+        bldpkgs $i
+        count2=$[count2+1]
+    done
+elif [[ $1 == "cpbuild" ]];
+then
+count2=0
+    for i in "${selected_packages[@]}" ; do
+        clpkgbld $i
+        cdpkgbld $i
+        bldpkgs $i
+        cppkgs $i
+        count2=$[count2+1]
+    done
+fi
+
+[ -d $HOME/work/github-PKGBUILDS ] || mkdir -p $HOME/work/github-PKGBUILDS
+
+
+
+if [[ $1 == "clone" ]];
+then
+notify-send -u low "Finished cloning selected packages' PKGBUILDS"
+fi
+}
+export -f clone_pkgbuilds
+
+em_up_pkgs() {
+clone_pkgbuilds cpbuild
+
+git clone https://github.com/$username/$reponame $HOME/work/$reponame
+cd $HOME/work/$reponame/x86_64
+rm -rf *
+cp -rf $HOME/work/repo-pkgs/*.pkg.tar.zst $HOME/work/$reponame/x86_64/
+repo-add $reponame.db.tar.gz *.pkg.tar.zst
+git add .
+git commit -m "updated packages"
+git push origin main
+notify-send -u low "Finished cleaning and uploading tarballs of selected packages to repo"
+}
+export -f em_up_pkgs
+
+sync_up_pkgs() {
+clone_pkgbuilds cpbuild
+
+git clone https://github.com/$username/$reponame $HOME/work/$reponame
+cd $HOME/work/$reponame/x86_64
+rm -rf *.db
+rm -rf *.db.tar.gz
+rm -rf *.files
+rm -rf *.files.tar.gz
+cp -rf $HOME/work/repo-pkgs/*.pkg.tar.zst $HOME/work/$reponame/x86_64/
+repo-add $reponame.db.tar.gz *.pkg.tar.zst
+git add .
+git commit -m "updated packages"
+git push origin main
+notify-send -u low "Finished syncing and uploading tarballs of selected packages to repo"
+}
+export -f sync_up_pkgs
+
+upall_pkg_repos() {
+list_repos
+
+declare -ag all_pkgs
+all_pkgs=(`cat $HOME/work/github-package-repo-manager/repos.txt`)
+
+count3=0
+for i in "${all_pkgs[@]}" ; do
+     mkdir -p $HOME/work/github-repos-PKGBUILDS/$i
+     curl https://raw.githubusercontent.com/$username/${i}/main/PKGBUILD -o $HOME/work/github-repos-PKGBUILDS/$i/PKGBUILD
+     cd $HOME/work/github-repos-PKGBUILDS/$i
+     makepkg -cfs
+     cp -rf *.pkg.tar.zst $HOME/work/repo-pkgs/
+     tput setaf 1; echo "Finished building $i"
+     count3=$[count3+1]
+done
+
+git clone https://github.com/$username/$reponame $HOME/work/$reponame
+cd $HOME/work/$reponame/x86_64
+rm -rf *.db
+rm -rf *.db.tar.gz
+rm -rf *.files
+rm -rf *.files.tar.gz
+cp -rf $HOME/work/repo-pkgs/*.pkg.tar.zst $HOME/work/$reponame/x86_64/
+repo-add $reponame.db.tar.gz *.pkg.tar.zst
+git add .
+git commit -m "updated packages"
+git push origin main
+notify-send -u low "Finished uploading tarballs of all packages to repo"
+}
+export -f upall_pkg_repos
+
+rm_all_pkgs_repo() {
+if $( kdialog --yesno "Do you want to remove all tarballs from repo?" );
+then
+git clone https://github.com/$username/$reponame $HOME/work/$reponame
+cd $HOME/work/$reponame/x86_64
+rm -rf *
+git add .
+git commit -m "Removed all Packages."
+git push origin main
+notify-send -u low "Finished removing tarballs of all packages from repo"
+fi
+}
+export -f rm_all_pkgs_repo
+
+init_func() {
+pre_func
+stdbuf -oL -eL yad --width='700' --height='250' --borders=0 --center \
+                  --title='Github Package Repo Manager' --no-escape \
+                  --window-icon=github-desktop --image=github-desktop \
+	              --text=" jslkhwelifwl we wefhlwkhglwel fhwlegh lwkhglkwkehwek ghwlkekh lw ghwelghlkwhglkwghlkwehglkwh lkgkew hwlek hwelkg hwelk welk ghlw wlekh lkweg hwlke wlkegh lkweg welk gw" \
+                  --form --columns=2 \
+                  --field "List Repos:FBTN" "echo 1" \
+                  --field "Clone Repos:FBTN" "echo 2" \
+                  --field "Clone all Repos:FBTN" "echo 3" \
+                  --field "Clone PKGBUILDS:FBTN" "echo 4" \
+                  --field "Build Packages:FBTN" "echo 5" \
+                  --field "Build Packages to Dir:FBTN" "echo 6" \
+                  --field "Empty and Upload Packages:FBTN" "echo 7" \
+                  --field "Sync and Upload Packages:FBTN" "echo 8" \
+                  --field "Sync and Upload all Packages:FBTN" "echo 9" \
+                  --field "Empty Package Repo:FBTN" "echo 10" \
+                  --button="Edit Config:echo ec" \
+                  --buttons-layout=center  --expand --stack \
+| while read -r line; do
+	case ${line##*/} in
+	    1)  list_repos ;;
+        2)  clone_repos ;;
+        3)  clone_all_repos ;;
+        4)  clone_pkgbuilds clone ;;
+        5)  clone_pkgbuilds build; notify-send -u low "Finished building selected package repos";;
+        6)  clone_pkgbuilds cpbuild; notify-send -u low "Finished copying tarballs of selected package repos";;
+        7)  em_up_pkgs ;;
+        8)  sync_up_pkgs ;;
+        9)  upall_pkg_repos ;;
+       10)  rm_all_pkgs_repo ;;
+       ec)  config_func; notify-send -u critical "Restart the app."  ;;
+        *)  true ;;
+	esac
+done
+}
+export -f init_func
+
+init_func
+
+
+
+
+
+
